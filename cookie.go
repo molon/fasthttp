@@ -372,7 +372,10 @@ func (c *Cookie) ParseBytes(src []byte) error {
 						if err != nil {
 							exptime, err = time.Parse("Mon, 02-Jan-06 15:04:05 MST", v)
 							if err != nil {
-								return err
+								exptime, err = time.Parse("Mon, 2 Jan 2006 15:04:05 MST", v)
+								if err != nil {
+									return err
+								}
 							}
 						}
 					}
