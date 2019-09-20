@@ -296,7 +296,7 @@ func writeHexInt(w *bufio.Writer, n int) error {
 	buf := v.([]byte)
 	i := len(buf) - 1
 	for {
-		buf[i] = int2hexbyte(n & 0xf)
+		buf[i] = lowerhex[n&0xf]
 		n >>= 4
 		if n == 0 {
 			break
@@ -306,20 +306,6 @@ func writeHexInt(w *bufio.Writer, n int) error {
 	_, err := w.Write(buf[i:])
 	hexIntBufPool.Put(v)
 	return err
-}
-
-func int2hexbyte(n int) byte {
-	if n < 10 {
-		return '0' + byte(n)
-	}
-	return 'a' + byte(n) - 10
-}
-
-func hexCharUpper(c byte) byte {
-	if c < 10 {
-		return '0' + c
-	}
-	return c - 10 + 'A'
 }
 
 var hex2intTable = func() []byte {
@@ -338,7 +324,11 @@ var hex2intTable = func() []byte {
 	return b
 }()
 
-const toLower = 'a' - 'A'
+const (
+	toLower  = 'a' - 'A'
+	upperhex = "0123456789ABCDEF"
+	lowerhex = "0123456789abcdef"
+)
 
 var toLowerTable = func() [256]byte {
 	var a [256]byte
@@ -393,6 +383,58 @@ func s2b(s string) (b []byte) {
 	return b
 }
 
+var quotedArgShouldEscapeTable = func() [256]bool {
+	// According to RFC 3986 §2.3
+	var a [256]bool
+	for i := 0; i < 256; i++ {
+		a[i] = true
+	}
+
+	// ALPHA
+	for i := int('a'); i <= int('z'); i++ {
+		a[i] = false
+	}
+	for i := int('A'); i <= int('Z'); i++ {
+		a[i] = false
+	}
+
+	// DIGIT
+	for i := int('0'); i <= int('9'); i++ {
+		a[i] = false
+	}
+
+	// Unreserved characters
+	a[int('-')] = false
+	a[int('_')] = false
+	a[int('.')] = false
+	a[int('~')] = false
+
+	return a
+}()
+
+var quotedPathShouldEscapeTable = func() [256]bool {
+	// The implementation here equal to net/url shouldEscape(s, encodePath)
+	//
+	// The RFC allows : @ & = + $ but saves / ; , for assigning
+	// meaning to individual path segments. This package
+	// only manipulates the path as a whole, so we allow those
+	// last three as well. That leaves only ? to escape.
+	var a = quotedArgShouldEscapeTable
+
+	// '$', '&', '+', ',', '/', ':', ';', '=', '@'
+	a[int('$')] = false
+	a[int('&')] = false
+	a[int('+')] = false
+	a[int(',')] = false
+	a[int('/')] = false
+	a[int(':')] = false
+	a[int(';')] = false
+	a[int('=')] = false
+	a[int('@')] = false
+
+	return a
+}()
+
 // AppendUnquotedArg appends url-decoded src to dst and returns appended dst.
 //
 // dst may point to src. In this case src will be overwritten.
@@ -403,33 +445,29 @@ func AppendUnquotedArg(dst, src []byte) []byte {
 // AppendQuotedArg appends url-encoded src to dst and returns appended dst.
 func AppendQuotedArg(dst, src []byte) []byte {
 	for _, c := range src {
-		// See http://www.w3.org/TR/html5/forms.html#form-submission-algorithm
-		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
-			c == '*' || c == '-' || c == '.' || c == '_' {
+		switch {
+		case c == ' ':
+			dst = append(dst, '+')
+		case quotedArgShouldEscapeTable[int(c)]:
+			dst = append(dst, '%', upperhex[c>>4], upperhex[c&0xf])
+		default:
 			dst = append(dst, c)
-		} else {
-			dst = append(dst, '%', hexCharUpper(c>>4), hexCharUpper(c&15))
 		}
 	}
 	return dst
 }
 
 func appendQuotedPath(dst, src []byte) []byte {
+	// Fix issue in https://github.com/golang/go/issues/11202
+	if len(src) == 1 && src[0] == '*' {
+		return append(dst, '*')
+	}
+
 	for _, c := range src {
-		// From the spec: http://tools.ietf.org/html/rfc3986#section-3.3
-		// an path can contain zero or more of pchar that is defined as follows:
-		// pchar       = unreserved / pct-encoded / sub-delims / ":" / "@"
-		// pct-encoded = "%" HEXDIG HEXDIG
-		// unreserved  = ALPHA / DIGIT / "-" / "." / "_" / "~"
-		// sub-delims  = "!" / "$" / "&" / "'" / "(" / ")"
-		//             / "*" / "+" / "," / ";" / "="
-		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
-			c == '-' || c == '.' || c == '_' || c == '~' || c == '!' || c == '$' ||
-			c == '&' || c == '\'' || c == '(' || c == ')' || c == '*' || c == '+' ||
-			c == ',' || c == ';' || c == '=' || c == ':' || c == '@' || c == '/' {
-			dst = append(dst, c)
+		if quotedPathShouldEscapeTable[int(c)] {
+			dst = append(dst, '%', upperhex[c>>4], upperhex[c&15])
 		} else {
-			dst = append(dst, '%', hexCharUpper(c>>4), hexCharUpper(c&15))
+			dst = append(dst, c)
 		}
 	}
 	return dst
