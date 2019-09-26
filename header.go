@@ -76,6 +76,9 @@ type RequestHeader struct {
 	// stores an immutable copy of headers as they were received from the
 	// wire.
 	rawHeadersCopy []byte
+
+	// stores header order
+	orderKeys []string
 }
 
 // SetContentRange sets 'Content-Range: bytes startPos-endPos/contentLength'
@@ -664,6 +667,7 @@ func (h *ResponseHeader) resetSkipNormalize() {
 // Reset clears request header.
 func (h *RequestHeader) Reset() {
 	h.disableNormalizing = false
+	h.orderKeys = nil
 	h.resetSkipNormalize()
 }
 
@@ -710,6 +714,7 @@ func (h *ResponseHeader) CopyTo(dst *ResponseHeader) {
 func (h *RequestHeader) CopyTo(dst *RequestHeader) {
 	dst.Reset()
 
+	dst.orderKeys = h.orderKeys
 	dst.disableNormalizing = h.disableNormalizing
 	dst.noHTTP11 = h.noHTTP11
 	dst.connectionClose = h.connectionClose
@@ -1572,6 +1577,10 @@ func (h *RequestHeader) String() string {
 	return string(h.Header())
 }
 
+func (h *RequestHeader) SetOrderKeys(orderKeys []string) {
+	h.orderKeys = orderKeys
+}
+
 // AppendBytes appends request header representation to dst and returns
 // the extended dst.
 func (h *RequestHeader) AppendBytes(dst []byte) []byte {
@@ -1587,14 +1596,21 @@ func (h *RequestHeader) AppendBytes(dst []byte) []byte {
 		return append(dst, h.rawHeaders...)
 	}
 
+	headers := map[string][]byte{}
+	origOrderKeys := []string{}
+
 	userAgent := h.UserAgent()
 	if len(userAgent) > 0 {
-		dst = appendHeaderLine(dst, strUserAgent, userAgent)
+		headers[b2s(strUserAgent)] = userAgent
+		origOrderKeys = append(origOrderKeys, b2s(strUserAgent))
+		// dst = appendHeaderLine(dst, strUserAgent, userAgent)
 	}
 
 	host := h.Host()
 	if len(host) > 0 {
-		dst = appendHeaderLine(dst, strHost, host)
+		headers[b2s(strHost)] = host
+		origOrderKeys = append(origOrderKeys, b2s(strHost))
+		// dst = appendHeaderLine(dst, strHost, host)
 	}
 
 	contentType := h.ContentType()
@@ -1602,35 +1618,78 @@ func (h *RequestHeader) AppendBytes(dst []byte) []byte {
 		if len(contentType) == 0 {
 			contentType = strPostArgsContentType
 		}
-		dst = appendHeaderLine(dst, strContentType, contentType)
+		headers[b2s(strContentType)] = contentType
+		origOrderKeys = append(origOrderKeys, b2s(strContentType))
+		// dst = appendHeaderLine(dst, strContentType, contentType)
 
 		if len(h.contentLengthBytes) > 0 {
-			dst = appendHeaderLine(dst, strContentLength, h.contentLengthBytes)
+			headers[b2s(strContentLength)] = h.contentLengthBytes
+			origOrderKeys = append(origOrderKeys, b2s(strContentLength))
+			// dst = appendHeaderLine(dst, strContentLength, h.contentLengthBytes)
 		}
 	} else if len(contentType) > 0 {
-		dst = appendHeaderLine(dst, strContentType, contentType)
+		headers[b2s(strContentType)] = contentType
+		origOrderKeys = append(origOrderKeys, b2s(strContentType))
+		// dst = appendHeaderLine(dst, strContentType, contentType)
 	}
 
 	for i, n := 0, len(h.h); i < n; i++ {
 		kv := &h.h[i]
-		dst = appendHeaderLine(dst, kv.key, kv.value)
+		headers[b2s(kv.key)] = kv.value
+		origOrderKeys = append(origOrderKeys, b2s(kv.key))
+		// dst = appendHeaderLine(dst, kv.key, kv.value)
 	}
 
 	// there is no need in h.collectCookies() here, since if cookies aren't collected yet,
 	// they all are located in h.h.
 	n := len(h.cookies)
 	if n > 0 {
-		dst = append(dst, strCookie...)
-		dst = append(dst, strColonSpace...)
-		dst = appendRequestCookieBytes(dst, h.cookies)
-		dst = append(dst, strCRLF...)
+		headers[b2s(strCookie)] = requestCookieBytes(h.cookies)
+		origOrderKeys = append(origOrderKeys, b2s(strCookie))
+		// dst = append(dst, strCookie...)
+		// dst = append(dst, strColonSpace...)
+		// dst = appendRequestCookieBytes(dst, h.cookies)
+		// dst = append(dst, strCRLF...)
 	}
 
 	if h.ConnectionClose() {
-		dst = appendHeaderLine(dst, strConnection, strClose)
+		headers[b2s(strConnection)] = strClose
+		origOrderKeys = append(origOrderKeys, b2s(strConnection))
+		// dst = appendHeaderLine(dst, strConnection, strClose)
+	}
+
+	if h.orderKeys != nil {
+		for _, k := range h.orderKeys {
+			if v, ok := headers[k]; ok {
+				dst = appendHeaderLine(dst, s2b(k), v)
+				delete(headers, k)
+			}
+		}
+	}
+
+	for _, k := range origOrderKeys {
+		if v, ok := headers[k]; ok {
+			dst = appendHeaderLine(dst, s2b(k), v)
+		}
 	}
 
 	return append(dst, strCRLF...)
+}
+
+func requestCookieBytes(cookies []argsKV) []byte {
+	ret := []byte{}
+	for i, n := 0, len(cookies); i < n; i++ {
+		kv := &cookies[i]
+		if len(kv.key) > 0 {
+			ret = append(ret, kv.key...)
+			ret = append(ret, '=')
+		}
+		ret = append(ret, kv.value...)
+		if i+1 < n {
+			ret = append(ret, ';', ' ')
+		}
+	}
+	return ret
 }
 
 func appendHeaderLine(dst, key, value []byte) []byte {
